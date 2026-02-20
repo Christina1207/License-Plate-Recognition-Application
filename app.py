@@ -21,6 +21,23 @@ def load_models():
 
 model, reader = load_models()
 
+def enhance_plate(plate_img):
+    # 1. Convert to Gray
+    gray = cv2.cvtColor(plate_img, cv2.COLOR_BGR2GRAY)
+    
+    # 2. Upscale (EasyOCR loves big characters)
+    # Target height of ~100-150 pixels for the plate
+    scale_factor = 2 if gray.shape[0] < 100 else 1
+    upscaled = cv2.resize(gray, None, fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_CUBIC)
+    
+    # 3. Bilateral Filter (Removes noise but keeps edges sharp)
+    denoised = cv2.bilateralFilter(upscaled, 11, 17, 17)
+    
+    # 4. Adaptive Thresholding (Handles shadows/uneven lighting)
+    thresh = cv2.adaptiveThreshold(denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                   cv2.THRESH_BINARY, 11, 2)
+    return thresh
+
 def process_video(video_path):
     cap = cv2.VideoCapture(video_path)
     
@@ -64,10 +81,8 @@ def process_video(video_path):
                 if plate_crop.size > 0:
                     # SPEED BOOST: Only run OCR every 5th frame
                     if frame_count % 5 == 0:
-                        gray = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2GRAY)
-                        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-                        gray = clahe.apply(gray)
-                        plate_resized = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+                        enhanced_plate = enhance_plate(plate_crop)
+                        plate_resized = cv2.resize(enhanced_plate, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
                         
                         ocr_results = reader.readtext(plate_resized, detail=1, allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-')
                         
