@@ -24,7 +24,7 @@ YOLO_WEIGHTS = "saved_models/license_plate_best.pt"
 TRACKER_CFG = "botsort.yaml"
 
 YOLO_CONF_THRESH = 0.30
-OCR_EVERY_N_FRAMES = 1          # OCR frequency per track
+OCR_EVERY_N_FRAMES = 3          # OCR frequency per track
 HISTORY_LEN = 15                # temporal voting window
 OCR_CONF_THRESH = 0.20          # your sample showed ~0.36; start lower than 0.4
 # ---------------------------------------------------------------------
@@ -145,6 +145,13 @@ def resize_plate_for_ocr(img_bgr, target_h=64):
     new_w = max(1, int(w * scale))
     return cv2.resize(img_bgr, (new_w, target_h), interpolation=cv2.INTER_CUBIC)
 
+def clahe_bgr(img_bgr):
+    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    l2 = clahe.apply(l)
+    merged = cv2.merge((l2, a, b))
+    return cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
 # ---------------------------------------------------------------------
 # Video processing
 # ---------------------------------------------------------------------
@@ -190,6 +197,7 @@ def process_video(video_path: str):
                     # Paddle expects RGB when given numpy arrays
                     
                     plate_crop = resize_plate_for_ocr(plate_crop)
+                    plate_crop = clahe_bgr(plate_crop)
                     plate_rgb = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2RGB)
 
                     # Use cls=True to match repo behavior (angle classification)
