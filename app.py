@@ -51,6 +51,159 @@ if paddle.is_compiled_with_cuda():
 else:
     st.warning("PaddleOCR is running on CPU. Install a CUDA-enabled PaddlePaddle build to enable GPU.")
 
+from collections import Counter
+
+def parse_paddle_dict_output(ocr_results, conf_thresh=0.4):
+    """
+    Parses Paddle doc-style output like you printed:
+    [
+      {
+        ...,
+        "rec_texts": [...],
+        "rec_scores": [...],
+        ...
+      }
+    ]
+    Returns: (text, best_conf)
+    """
+    if not ocr_results or not isinstance(ocr_results, list):
+        return "", 0.0
+
+    text_parts = []
+    best_conf = 0.0
+
+    for item in ocr_results:
+        if not isinstance(item, dict):
+            continue
+
+        rec_texts = item.get("rec_texts") or []
+        rec_scores = item.get("rec_scores") or []
+
+        # If scores missing, treat as 0.0
+        if not rec_scores:
+            rec_scores = [0.0] * len(rec_texts)
+
+        for t, s in zip(rec_texts, rec_scores):
+            try:
+                s = float(s)
+            except Exception:
+                s = 0.0
+
+            best_conf = max(best_conf, s)
+
+            if s >= conf_thresh and t:
+                clean = "".join(re.findall(r"[A-Z0-9]", str(t).upper()))
+                if clean:
+                    text_parts.append(clean)
+
+    return "".join(text_parts), best_conf
+
+def parse_paddleocr_results(ocr_results, conf_thresh=0.4):
+    """
+    Returns (full_text, best_conf) from PaddleOCR output.
+    Handles common nesting differences across PaddleOCR versions.
+    """
+    if not ocr_results:
+        return "", 0.0
+
+    # Common case: ocr_results = [lines] where lines = [line1, line2, ...]
+    # Sometimes it is already lines (not wrapped).
+    if len(ocr_results) == 1 and isinstance(ocr_results[0], list) and ocr_results and (
+        len(ocr_results[0]) == 0 or isinstance(ocr_results[0][0], (list, tuple))
+    ):
+        lines = ocr_results[0]
+    else:
+        lines = ocr_results
+
+    text_parts = []
+    best_conf = 0.0
+
+    for line in lines:
+        if not line or len(line) < 2:
+            continue
+
+        # Typical: line[1] == (text, conf)
+        text_conf = line[1]
+
+        detected_text = None
+        ocr_conf = None
+
+        if isinstance(text_conf, (tuple, list)) and len(text_conf) >= 2:
+            detected_text = text_conf[0]
+            ocr_conf = float(text_conf[1])
+        elif isinstance(text_conf, dict):
+            # Rare variant
+            detected_text = text_conf.get("text")
+            ocr_conf = float(text_conf.get("score", 0.0))
+
+        if detected_text is None or ocr_conf is None:
+            continue
+
+        best_conf = max(best_conf, ocr_conf)
+
+        if ocr_conf >= conf_thresh:
+            clean = "".join(re.findall(r"[A-Z0-9]", str(detected_text).upper()))
+            if clean:
+                text_parts.append(clean)
+
+    return "".join(text_parts), best_conf
+
+def detect_international_plate(text: str) -> bool:
+    if len(text) < 3:
+        return False
+    for ch in text:
+        if not ("0" <= ch <= "9" or "A" <= ch <= "Z"):
+            return False
+    return True
+
+def process_text_like_repo(text: str) -> str:
+    """
+    Based on ProcessText + Detect_International_LicensePlate from Alfonso Blanco's script,
+    but fixed to actually slice correctly.
+    """
+    if not text:
+        return ""
+
+    # Keep only alnum + uppercase
+    text = "".join(ch for ch in text.upper() if ch.isalnum())
+
+    # Keep last 7-10 chars (repo code intends this, but the slicing there is buggy)
+    if len(text) > 10:
+        text = text[-10:]
+    if len(text) > 9:
+        text = text[-9:]
+    if len(text) > 8:
+        text = text[-8:]
+    if len(text) > 7:
+        text = text[-7:]
+
+    return text if detect_international_plate(text) else ""
+
+def extract_text_from_paddle(ocr_results) -> str:
+    """
+    Mimics the repo behavior: concatenate all line texts into one string.
+    But returns a cleaned/validated plate string via process_text_like_repo.
+    """
+    if not ocr_results:
+        return ""
+
+    parts = []
+    # PaddleOCR returns either [ [line, line, ...] ] or list per image; handle both.
+    for block in ocr_results:
+        if block is None:
+            continue
+        for line in block:
+            if not line or len(line) < 2:
+                continue
+            text_score = line[1]
+            if not isinstance(text_score, (list, tuple)) or len(text_score) < 1:
+                continue
+            raw_text = text_score[0]
+            if raw_text:
+                parts.append(raw_text)
+
+    joined = "".join(parts)
+    return process_text_like_repo(joined)
 def enhance_plate(plate_img):
     # 1. Convert to RGB 
     plate_rgb = cv2.cvtColor(plate_img, cv2.COLOR_BGR2RGB)
@@ -114,50 +267,19 @@ def process_video(video_path):
                     is_new_track = track_id not in plate_history
                     
                     if is_new_track or (frame_count % 5 == 0):
-                        enhanced_plate = enhance_plate(plate_crop)
+                        # Repo-style OCR: run OCR on the crop (no enhancement functions for now)
+                        ocr_results = ocr_reader.ocr(plate_crop)
                         
-                        ocr_results = ocr_reader.ocr(enhanced_plate)
-                        
-                        text_parts = []
-                        # Check if results exist and are not None
-                        if ocr_results and ocr_results[0] is not None:
-                            for res in ocr_results:
-                                if res is None: continue # Skip if specific result is None
-                                for line in res:
-                                    # line structure is normally: [ [box_coords], (text, confidence) ]
-                                    
-                                    # 1. Safety Check: Ensure line has 2 elements and the second is a tuple/list
-                                    if len(line) >= 2 and isinstance(line[1], (list, tuple)):
-                                        text_data = line[1]
-                                        
-                                        # 2. Unpack Safety: Ensure we have exactly (Text, Score)
-                                        if len(text_data) == 2:
-                                            detected_text, ocr_conf = text_data
-                                            
-                                            # 3. Logic Fix: This check must be INSIDE the loop
-                                            if ocr_conf > 0.4:
-                                                # Clean non-alphanumeric
-                                                clean_part = "".join(re.findall(r'[A-Z0-9]', detected_text.upper()))
-                                                text_parts.append(clean_part)
-                                    else:
-                                        # Handle malformed Paddle output gracefully
-                                        continue
-                        else:
-                            # Optional: Handle cases where OCR returned nothing
-                            pass
-                        
-                        full_text = "".join(text_parts)
+                        full_text, best_conf = parse_paddle_dict_output(ocr_results, conf_thresh=0.4)
+
                         if full_text:
                             plate_history[track_id].append(full_text)
                 
                 # STABILIZATION & DISPLAY
                 current_history = plate_history[track_id]
                 if len(current_history) > 0:
-                    if len(current_history) < 3:
-                        stable_text = current_history[-1]
-                    else:
-                        # Find the most common text (mode)
-                        stable_text = max(set(current_history), key=current_history.count)
+                    counts = Counter(current_history)
+                    stable_text, stable_count = counts.most_common(1)[0]
                     
                     # Draw Box
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
