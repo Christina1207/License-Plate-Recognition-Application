@@ -24,7 +24,7 @@ YOLO_WEIGHTS = "saved_models/license_plate_best.pt"
 TRACKER_CFG = "botsort.yaml"
 
 YOLO_CONF_THRESH = 0.30
-OCR_EVERY_N_FRAMES = 5          # OCR frequency per track
+OCR_EVERY_N_FRAMES = 1          # OCR frequency per track
 HISTORY_LEN = 15                # temporal voting window
 OCR_CONF_THRESH = 0.20          # your sample showed ~0.36; start lower than 0.4
 # ---------------------------------------------------------------------
@@ -125,6 +125,26 @@ def parse_paddle_dict_output(ocr_results, conf_thresh: float) -> tuple[str, floa
     # Repo behavior: concatenate text parts; for plates usually only one anyway
     return "".join(collected), best_conf
 
+
+# ---------------------------------------------------------------------
+# Enhancements to the cropped plate image before OCR
+# ---------------------------------------------------------------------
+def crop_with_padding(frame, x1, y1, x2, y2, pad=0.08):
+    h, w = frame.shape[:2]
+    bw, bh = (x2 - x1), (y2 - y1)
+    px, py = int(bw * pad), int(bh * pad)
+    x1p, y1p = max(0, x1 - px), max(0, y1 - py)
+    x2p, y2p = min(w, x2 + px), min(h, y2 + py)
+    return frame[y1p:y2p, x1p:x2p]
+
+def resize_plate_for_ocr(img_bgr, target_h=64):
+    h, w = img_bgr.shape[:2]
+    if h == 0: 
+        return img_bgr
+    scale = target_h / h
+    new_w = max(1, int(w * scale))
+    return cv2.resize(img_bgr, (new_w, target_h), interpolation=cv2.INTER_CUBIC)
+
 # ---------------------------------------------------------------------
 # Video processing
 # ---------------------------------------------------------------------
@@ -160,7 +180,7 @@ def process_video(video_path: str):
                 x1, y1 = max(0, x1), max(0, y1)
                 x2, y2 = min(w, x2), min(h, y2)
 
-                plate_crop = frame[y1:y2, x1:x2]
+                plate_crop = crop_with_padding(frame, x1, y1, x2, y2)
                 if plate_crop.size == 0:
                     continue
 
@@ -168,6 +188,8 @@ def process_video(video_path: str):
                 is_new_track = track_id not in plate_history
                 if is_new_track or (frame_count % OCR_EVERY_N_FRAMES == 0):
                     # Paddle expects RGB when given numpy arrays
+                    
+                    plate_crop = resize_plate_for_ocr(plate_crop)
                     plate_rgb = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2RGB)
 
                     # Use cls=True to match repo behavior (angle classification)
@@ -199,9 +221,7 @@ def process_video(video_path: str):
                         (0, 255, 0),
                         -1,
                     )
-                    cv2.putText(
-                        frame,
-                        stable_text,
+                    cv2.putText(frame,stable_text,
                         (x1 + 5, y1 - 5),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.7,
