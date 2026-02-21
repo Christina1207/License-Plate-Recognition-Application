@@ -1,6 +1,7 @@
 import os
 import re
 import tempfile
+import numpy as np
 from collections import defaultdict, deque , Counter
 
 import cv2
@@ -24,7 +25,7 @@ YOLO_WEIGHTS = "saved_models/license_plate_best.pt"
 TRACKER_CFG = "botsort.yaml"
 
 YOLO_CONF_THRESH = 0.30
-OCR_EVERY_N_FRAMES = 3          # OCR frequency per track
+OCR_EVERY_N_FRAMES = 2          # OCR frequency per track
 HISTORY_LEN = 15                # temporal voting window
 OCR_CONF_THRESH = 0.20          # your sample showed ~0.36; start lower than 0.4
 # ---------------------------------------------------------------------
@@ -129,7 +130,7 @@ def parse_paddle_dict_output(ocr_results, conf_thresh: float) -> tuple[str, floa
 # ---------------------------------------------------------------------
 # Enhancements to the cropped plate image before OCR
 # ---------------------------------------------------------------------
-def crop_with_padding(frame, x1, y1, x2, y2, pad=0.08):
+def crop_with_padding(frame, x1, y1, x2, y2, pad=0.20):
     h, w = frame.shape[:2]
     bw, bh = (x2 - x1), (y2 - y1)
     px, py = int(bw * pad), int(bh * pad)
@@ -152,6 +153,112 @@ def clahe_bgr(img_bgr):
     l2 = clahe.apply(l)
     merged = cv2.merge((l2, a, b))
     return cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
+
+
+def deskew_plate(bgr):
+    """
+    Rotates the crop so the dominant rectangular plate region becomes horizontal.
+    Works best after resize (so edges are clearer).
+    """
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+
+    edges = cv2.Canny(gray, 50, 150)
+
+    # Find contours on edges
+    cnts, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return bgr
+
+    # Use the largest contour as a proxy for plate boundary
+    c = max(cnts, key=cv2.contourArea)
+    if cv2.contourArea(c) < 50:  # too small / noisy
+        return bgr
+
+    rect = cv2.minAreaRect(c)  # ((cx,cy),(w,h),angle)
+    angle = rect[-1]
+
+    # minAreaRect angle conventions are weird:
+    # angle is in [-90, 0). We want a small rotation to horizontal.
+    if angle < -45:
+        angle = angle + 90
+
+    # Only rotate if it’s a meaningful tilt
+    if abs(angle) < 2.0:
+        return bgr
+
+    (h, w) = bgr.shape[:2]
+    center = (w // 2, h // 2)
+    M = cv2.getRotationMatrix2D(center, angle, 1.0)
+    rotated = cv2.warpAffine(bgr, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+    return rotated
+
+
+
+
+def order_points(pts):
+    # pts: (4,2)
+    rect = np.zeros((4, 2), dtype="float32")
+    s = pts.sum(axis=1)
+    rect[0] = pts[np.argmin(s)]  # top-left
+    rect[2] = pts[np.argmax(s)]  # bottom-right
+    diff = np.diff(pts, axis=1)
+    rect[1] = pts[np.argmin(diff)]  # top-right
+    rect[3] = pts[np.argmax(diff)]  # bottom-left
+    return rect
+
+def rectify_plate_perspective(bgr):
+    """
+    Attempts to find a 4-corner contour and warp it to a rectangle.
+    If it can’t find a good quad, returns original.
+    """
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    gray = cv2.bilateralFilter(gray, 7, 50, 50)
+    edges = cv2.Canny(gray, 50, 150)
+
+    cnts, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return bgr
+
+    cnts = sorted(cnts, key=cv2.contourArea, reverse=True)[:10]
+
+    quad = None
+    for c in cnts:
+        peri = cv2.arcLength(c, True)
+        approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+        if len(approx) == 4 and cv2.contourArea(approx) > 200:
+            quad = approx
+            break
+
+    if quad is None:
+        return bgr
+
+    pts = quad.reshape(4, 2).astype("float32")
+    rect = order_points(pts)
+    (tl, tr, br, bl) = rect
+
+    widthA = np.linalg.norm(br - bl)
+    widthB = np.linalg.norm(tr - tl)
+    maxW = int(max(widthA, widthB))
+
+    heightA = np.linalg.norm(tr - br)
+    heightB = np.linalg.norm(tl - bl)
+    maxH = int(max(heightA, heightB))
+
+    if maxW < 20 or maxH < 20:
+        return bgr
+
+    dst = np.array([
+        [0, 0],
+        [maxW - 1, 0],
+        [maxW - 1, maxH - 1],
+        [0, maxH - 1]
+    ], dtype="float32")
+
+    M = cv2.getPerspectiveTransform(rect, dst)
+    warped = cv2.warpPerspective(bgr, M, (maxW, maxH), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+    return warped
+
 # ---------------------------------------------------------------------
 # Video processing
 # ---------------------------------------------------------------------
@@ -197,6 +304,9 @@ def process_video(video_path: str):
                     # Paddle expects RGB when given numpy arrays
                     
                     plate_crop = resize_plate_for_ocr(plate_crop)
+                    plate = rectify_plate_perspective(plate_crop)
+                    plate = resize_plate_for_ocr(plate, target_h=64)
+                    plate_crop = deskew_plate(plate_crop)
                     plate_crop = clahe_bgr(plate_crop)
                     plate_rgb = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2RGB)
 
