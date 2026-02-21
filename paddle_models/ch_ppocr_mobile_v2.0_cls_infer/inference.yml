@@ -1,0 +1,5 @@
+Global:
+  model_name: PP-LCNet_x1_0_textline_ori
+  model_type: cls
+  input_shape: [3, 48, 192]
+  batch_size: 1
