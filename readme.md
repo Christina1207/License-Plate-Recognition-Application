@@ -38,7 +38,6 @@ This project builds an **Automatic License Plate Recognition (ALPR)** applicatio
 ## Project structure (key files)
 - `app.py` — Streamlit application containing the full ALPR pipeline (detection, tracking, OCR, visualization).
 - `saved_models/license_plate_best.pt` — YOLO weights file (must exist locally for detection to work).
-- `botsort.yaml` — tracker configuration file used by Ultralytics tracking.
 
 ---
 
@@ -99,12 +98,3 @@ For each frame:
   - a filled label background and the stabilized OCR text
 - Streamlit shows the annotated frames as the video is processed.
 
----
-
-## How to run the app
-
-### 1) Install dependencies
-Create a virtual environment (recommended), then install dependencies:
-
-```bash
-pip install streamlit opencv-python ultralytics paddleocr paddlepaddle numpy
