@@ -15,7 +15,7 @@ import paddle
 # ---------------------------------------------------------------------
 # App UI
 # ---------------------------------------------------------------------
-st.title("🚗 ALPR: Auto License Plate Recognition App")
+st.title("ALPR: Auto License Plate Recognition App")
 st.write("Upload a video to detect and recognize vehicle license plates.")
 
 # ---------------------------------------------------------------------
@@ -24,10 +24,10 @@ st.write("Upload a video to detect and recognize vehicle license plates.")
 YOLO_WEIGHTS = "saved_models/license_plate_best.pt"
 TRACKER_CFG = "botsort.yaml"
 
-YOLO_CONF_THRESH = 0.30
+YOLO_CONF_THRESH = 0.30         # conf threshold for YOLO detections 
 OCR_EVERY_N_FRAMES = 2          # OCR frequency per track
 HISTORY_LEN = 15                # temporal voting window
-OCR_CONF_THRESH = 0.20          # your sample showed ~0.36; start lower than 0.4
+OCR_CONF_THRESH = 0.20          # conf threshold for accepting OCR text candidates
 # ---------------------------------------------------------------------
 # Model loading
 # ---------------------------------------------------------------------
@@ -48,7 +48,7 @@ else:
     st.warning("PaddleOCR is running on CPU. Install a CUDA-enabled PaddlePaddle build to enable GPU.")
 
 # ---------------------------------------------------------------------
-# Repo-style text validation/cleanup (adapted + fixed slicing)
+# Text validation/cleanup (adapted + fixed slicing)
 # ---------------------------------------------------------------------
 def detect_international_plate(text: str) -> bool:
     if len(text) < 3:
@@ -58,21 +58,15 @@ def detect_international_plate(text: str) -> bool:
             return False
     return True
 
-def process_text_like_repo(text: str) -> str:
+def process_text(text: str) -> str:
     if not text:
         return ""
 
     text = "".join(ch for ch in text.upper() if ch.isalnum())
 
-    # Keep last 7..10 characters (repo intent)
+    # Keep last 7..10 characters 
     if len(text) > 10:
         text = text[-10:]
-    if len(text) > 9:
-        text = text[-9:]
-    if len(text) > 8:
-        text = text[-8:]
-    if len(text) > 7:
-        text = text[-7:]
 
     return text if detect_international_plate(text) else ""
 
@@ -117,13 +111,12 @@ def parse_paddle_dict_output(ocr_results, conf_thresh: float) -> tuple[str, floa
             best_conf = max(best_conf, s)
 
             if t and s >= conf_thresh:
-                # Clean to A-Z0-9 first, then apply repo-ish final validation
+                
                 cleaned = "".join(re.findall(r"[A-Z0-9]", str(t).upper()))
-                cleaned = process_text_like_repo(cleaned)
+                cleaned = process_text(cleaned)
                 if cleaned:
                     collected.append(cleaned)
 
-    # Repo behavior: concatenate text parts; for plates usually only one anyway
     return "".join(collected), best_conf
 
 
@@ -263,6 +256,34 @@ def rectify_plate_perspective(bgr):
 # Video processing
 # ---------------------------------------------------------------------
 def process_video(video_path: str):
+    """
+    Processes a video file to detect, track, and recognize license plates frame by frame.
+    Args:
+        video_path (str): Path to the input video file.
+    Workflow:
+        1. Initializes video capture and a Streamlit frame placeholder for displaying results.
+        2. Sets up a history buffer for each detected plate track to stabilize OCR results over time.
+        3. Iterates through each frame of the video:
+            a. Reads the next frame; stops if the video ends.
+            b. Runs object detection and tracking on the frame to find license plates.
+            c. For each detected plate:
+                - Skips if detection confidence is too low or if no track ID is assigned.
+                - Crops the plate region from the frame, applying padding and boundary checks.
+                - Periodically (or for new tracks), preprocesses the plate image (resize, rectify, deskew, enhance) for OCR.
+                - Runs OCR to extract text from the plate, parsing results and filtering by confidence.
+                - Updates the plate's history buffer with recognized text.
+                - Selects the most frequent (stable) text from the history buffer for display.
+                - Draws a bounding box and overlays the stable plate text on the frame.
+            d. Displays the processed frame in the Streamlit app.
+        4. Releases video resources and notifies the user upon completion.
+    Rationale for Order:
+        - Detection and tracking are performed first to localize and associate plates across frames.
+        - Cropping and preprocessing are done before OCR to maximize recognition accuracy.
+        - OCR is run selectively to save computation, using history to stabilize results and reduce flicker.
+        - Drawing and display are done last to provide real-time visual feedback to the user.
+    Returns:
+        None. The function displays processed frames in a Streamlit interface and shows a success message when done.
+    """
     cap = cv2.VideoCapture(video_path)
     st_frame = st.empty()
 
@@ -310,7 +331,7 @@ def process_video(video_path: str):
                     plate_crop = clahe_bgr(plate_crop)
                     plate_rgb = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2RGB)
 
-                    # Use cls=True to match repo behavior (angle classification)
+                    # Use cls=True for angle classification
                     ocr_results = ocr_reader.ocr(plate_rgb)
 
                     full_text, best_conf = parse_paddle_dict_output(
